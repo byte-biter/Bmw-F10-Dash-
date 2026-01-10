@@ -9,6 +9,7 @@
  * MCP2515 CS   -> GPIO 39
  * 
  * Diesel F10 - All warning lights OFF by default
+ * REAR SEATBELT WARNING DISABLED
  */
 
 #include <SPI.h>
@@ -35,6 +36,17 @@ int engineTemperature = 100; // 100 = normal operating temp
 uint8_t driveMode = 2; // 2=Comfort
 int fuelLevel = 100; // 100%
 
+// Cruise control state
+bool cruiseControlActive = false;
+int cruiseSetSpeed = 0;
+// Manual test values for 0x289 message
+uint8_t test289_b1 = 0xE0;
+uint8_t test289_b2 = 0xE0;
+uint8_t test289_b3 = 0xE1;
+uint8_t test289_b4 = 0x00;
+uint8_t test289_b5 = 0xEC;
+uint8_t test289_b6 = 0x01;
+
 // Warning lights - ALL OFF
 bool doorOpen = false;
 bool dscAlert = false;
@@ -42,6 +54,24 @@ bool handbrake = false;
 bool checkEngine = false;
 bool dscOff = false;
 bool parkBrake = false;
+bool sosCall = false; // SOS call active/inactive
+bool chassisWarning = false; // Chassis warning
+bool cruiseWarning = false; // Cruise control keep distance warning
+bool brakeFailure = false; // Brake failure warning
+bool dippedBeamFailure = false; // Dipped beam failure warning
+bool trailerReversing = false; // Trailer reversing light failure
+bool restraintRear = false; // Restraint system rear failure
+bool fastenSeatbelts = false; // Fasten seatbelts warning
+bool warning73 = false; // Test ID 73
+bool warning85 = false; // Test ID 85
+bool warning88 = false; // Test ID 88
+
+// Seatbelt status - all buckled to prevent warnings
+bool driverSeatbelt = true;
+bool passengerSeatbelt = true;
+bool rearLeftSeatbelt = true;
+bool rearCenterSeatbelt = true;
+bool rearRightSeatbelt = true;
 
 // Lights - Main lights ON
 bool mainLights = true;
@@ -177,35 +207,226 @@ void sendTransmission() {
   CAN.sendMsgBuf(0x3FD, 0, 5, transmissionWithCRC);
 }
 
-// 0x5C0 - Alerts (send OFF explicitly to turn off)
+// 0x5C0 - Alerts (using reference implementation approach)
 void sendAlerts() {
-  // Door - OFF by default
-  uint8_t doorMsg[] = { 0x40, 0x0F, 0x00, (doorOpen ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, doorMsg);
+  // Check control messages - same CAN ID 0x5C0 used for variety of messages
+  // Sending 0x29 on byte 3 sets the alert, 0x28 clears it
+  // Known IDs: 34=check engine, 35/215=DSC, 36=DSC OFF, 24=park brake yellow, 71=park brake red, 77=seatbelt, 299=SOS call system
   
-  // DSC - OFF by default  
-  uint8_t dscMsg[] = { 0x40, 215, 0x00, (dscAlert ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, dscMsg);
+  // Door alert
+  if (doorOpen) {
+    uint8_t message[] = { 0x40, 0x0F, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 0x0F, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
   
-  // Handbrake (red) - OFF by default
-  uint8_t handbrakeMsg[] = { 0x40, 71, 0x00, (handbrake ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, handbrakeMsg);
+  // DSC alert
+  if (dscAlert) {
+    uint8_t message[] = { 0x40, 215, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 215, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
   
-  // Check Engine - OFF by default
-  uint8_t checkEngineMsg[] = { 0x40, 34, 0x00, (checkEngine ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, checkEngineMsg);
+  // Handbrake (red) - only for diesel F10, not Mini
+  if (handbrake) {
+    uint8_t message[] = { 0x40, 71, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 71, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
   
-  // DSC OFF indicator - OFF by default
-  uint8_t dscOffMsg[] = { 0x40, 36, 0x00, (dscOff ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, dscOffMsg);
+  // Check Engine
+  if (checkEngine) {
+    uint8_t message[] = { 0x40, 34, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 34, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
   
-  // Park Brake (yellow) - OFF by default
-  uint8_t parkBrakeMsg[] = { 0x40, 24, 0x00, (parkBrake ? 0x29 : 0x28), 0xFF, 0xFF, 0xFF, 0xFF };
-  CAN.sendMsgBuf(0x5C0, 0, 8, parkBrakeMsg);
+  // DSC OFF indicator
+  if (dscOff) {
+    uint8_t message[] = { 0x40, 36, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 36, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
   
-  // Seatbelt - OFF by default (ID 77)
+  // Park Brake (yellow)
+  if (parkBrake) {
+    uint8_t message[] = { 0x40, 24, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  } else {
+    uint8_t message[] = { 0x40, 24, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, message);
+  }
+  
+  // Seatbelt indicator - ALWAYS CLEAR (ID 77)
   uint8_t seatBeltMsg[] = { 0x40, 77, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
   CAN.sendMsgBuf(0x5C0, 0, 8, seatBeltMsg);
+  
+  // Test ID 73 individually (still unknown - keeping for testing)
+  if (warning73) {
+    uint8_t msg73[] = { 0x40, 73, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, msg73);
+  } else {
+    uint8_t msg73[] = { 0x40, 73, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, msg73);
+  }
+  
+  // Cruise control keep distance (ID 85 - CONFIRMED!)
+  if (cruiseWarning) {
+    uint8_t cruiseMsg[] = { 0x40, 85, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, cruiseMsg);
+  } else {
+    uint8_t cruiseMsg[] = { 0x40, 85, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, cruiseMsg);
+  }
+  
+  // Dipped beam left (ID 88 - CONFIRMED!)
+  if (dippedBeamFailure) {
+    uint8_t dippedMsg[] = { 0x40, 88, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg);
+  } else {
+    uint8_t dippedMsg[] = { 0x40, 88, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg);
+  }
+  
+  // Fasten seatbelts warning (IDs 86, 87, 91)
+  if (dippedBeamFailure) {
+    uint8_t dippedMsg1[] = { 0x40, 98, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg1);
+    
+    uint8_t dippedMsg2[] = { 0x40, 99, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg2);
+    
+    uint8_t dippedMsg3[] = { 0x40, 100, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg3);
+  } else {
+    uint8_t dippedMsg1[] = { 0x40, 98, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg1);
+    
+    uint8_t dippedMsg2[] = { 0x40, 99, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg2);
+    
+    uint8_t dippedMsg3[] = { 0x40, 100, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, dippedMsg3);
+  }
+  
+  // Fasten seatbelts warning (IDs 86, 87, 91)
+  if (fastenSeatbelts) {
+    uint8_t seatbeltMsg1[] = { 0x40, 86, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg1);
+    
+    uint8_t seatbeltMsg2[] = { 0x40, 87, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg2);
+    
+    uint8_t seatbeltMsg3[] = { 0x40, 91, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg3);
+  } else {
+    uint8_t seatbeltMsg1[] = { 0x40, 86, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg1);
+    
+    uint8_t seatbeltMsg2[] = { 0x40, 87, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg2);
+    
+    uint8_t seatbeltMsg3[] = { 0x40, 91, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, seatbeltMsg3);
+  }
+  
+  // Brake failure warning (ID 72, 74)
+  if (brakeFailure) {
+    uint8_t brakeMsg1[] = { 0x40, 72, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, brakeMsg1);
+    
+    uint8_t brakeMsg2[] = { 0x40, 74, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, brakeMsg2);
+  } else {
+    uint8_t brakeMsg1[] = { 0x40, 72, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, brakeMsg1);
+    
+    uint8_t brakeMsg2[] = { 0x40, 74, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, brakeMsg2);
+  }
+  
+  // Trailer reversing light failure (IDs 76, 89, 90)
+  if (trailerReversing) {
+    uint8_t trailerMsg1[] = { 0x40, 76, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg1);
+    
+    uint8_t trailerMsg2[] = { 0x40, 89, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg2);
+    
+    uint8_t trailerMsg3[] = { 0x40, 90, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg3);
+  } else {
+    uint8_t trailerMsg1[] = { 0x40, 76, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg1);
+    
+    uint8_t trailerMsg2[] = { 0x40, 89, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg2);
+    
+    uint8_t trailerMsg3[] = { 0x40, 90, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, trailerMsg3);
+  }
+  
+  // Restraint system rear failure (IDs 92, 93, 94)
+  if (restraintRear) {
+    uint8_t restraintMsg1[] = { 0x40, 92, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg1);
+    
+    uint8_t restraintMsg2[] = { 0x40, 93, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg2);
+    
+    uint8_t restraintMsg3[] = { 0x40, 94, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg3);
+  } else {
+    uint8_t restraintMsg1[] = { 0x40, 92, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg1);
+    
+    uint8_t restraintMsg2[] = { 0x40, 93, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg2);
+    
+    uint8_t restraintMsg3[] = { 0x40, 94, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, restraintMsg3);
+  }
+  
+  // Chassis warning (ID 299 = 0x12B)
+  // This is the actual chassis warning
+  if (chassisWarning) {
+    uint8_t chassisMsg[] = { 0x40, 299 & 0xFF, 0x00, 0x29, 0xFF, 0xF7, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, chassisMsg);
+  } else {
+    uint8_t chassisMsg[] = { 0x40, 299 & 0xFF, 0x00, 0x28, 0xFF, 0xF7, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, chassisMsg);
+  }
+  
+  // SOS Call System (trying IDs 95, 96, 97, 196)
+  if (sosCall) {
+    uint8_t sosMsg1[] = { 0x40, 196, 0x00, 0x29, 0xFF, 0xF7, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg1);
+    
+    uint8_t sosMsg2[] = { 0x40, 95, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg2);
+    
+    uint8_t sosMsg3[] = { 0x40, 96, 0x00, 0x29, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg3);
+  } else {
+    uint8_t sosMsg1[] = { 0x40, 196, 0x00, 0x28, 0xFF, 0xF7, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg1);
+    
+    uint8_t sosMsg2[] = { 0x40, 95, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg2);
+    
+    uint8_t sosMsg3[] = { 0x40, 96, 0x00, 0x28, 0xFF, 0xFF, 0xFF, 0xFF };
+    CAN.sendMsgBuf(0x5C0, 0, 8, sosMsg3);
+  }
 }
 
 // 0x21A - Lights
@@ -281,9 +502,43 @@ void sendPowerSteering() {
   CAN.sendMsgBuf(0x2A7, 0, 5, steeringColumnWithCRC);
 }
 
+// 0x0AA - Rear Seatbelt Status (clears rear seatbelt warning)
+void sendRearSeatbeltStatus() {
+  // Try configuration 1: All zeros (buckled on some F10s)
+  unsigned char rearSeatbeltMsg[] = { 
+    0x00,  // Byte 0: Rear status
+    0x00,  // Byte 1: Rear status
+    0x00,  // Byte 2
+    0x00,  // Byte 3
+    0x00,  // Byte 4
+    0x00,  // Byte 5
+    0x00,  // Byte 6
+    0x00   // Byte 7
+  };
+  CAN.sendMsgBuf(0x0AA, 0, 8, rearSeatbeltMsg);
+}
+
+// 0x0D0 - Alternative seatbelt status message
+void sendAlternativeSeatbeltStatus() {
+  // Some F10s use this message for seatbelt warnings
+  unsigned char altSeatbeltMsg[] = { 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  };
+  CAN.sendMsgBuf(0x0D0, 0, 8, altSeatbeltMsg);
+}
+
 // 0x289 - Cruise Control
 void sendCruiseControl() {
-  unsigned char cruiseWithoutCRC[] = { 0xF0 | counter4Bit, 0xE0, 0xE0, 0xE1, 0x00, 0xEC, 0x01 };
+  // Use manual test values when cruise testing, otherwise use defaults
+  unsigned char cruiseWithoutCRC[] = { 
+    0xF0 | counter4Bit, 
+    test289_b1,
+    test289_b2,
+    test289_b3,
+    test289_b4,
+    test289_b5,
+    test289_b6
+  };
   unsigned char cruiseWithCRC[] = { 
     crc8Calculator.get_crc8(cruiseWithoutCRC, 7, 0x82), 
     cruiseWithoutCRC[0], cruiseWithoutCRC[1], cruiseWithoutCRC[2],
@@ -303,9 +558,18 @@ void sendAirbag() {
   CAN.sendMsgBuf(0x19B, 0, 8, restraintWithCRC);
 }
 
-// 0x297 - Seatbelt System (kept, fixed to not flash)
+// 0x297 - Seatbelt System (Enhanced with proper rear seatbelt status)
 void sendSeatbeltSystem() {
-  unsigned char restraint2WithoutCRC[] = { 0xE0 | counter4Bit, 0xF1, 0xF0, 0xF2, 0xF2, 0xFE };
+  // Try different byte patterns for rear seatbelt status
+  // 0xF0 might mean "not buckled/no occupant" on some models
+  unsigned char restraint2WithoutCRC[] = { 
+    0xE0 | counter4Bit, 
+    0xF1,  // Driver buckled
+    0xF0,  // Passenger buckled
+    0xF0,  // Rear left - CHANGED to 0xF0 (no occupant/buckled)
+    0xF0,  // Rear center/right - CHANGED to 0xF0
+    0xFE   // Status OK
+  };
   unsigned char restraint2WithCRC[] = { 
     crc8Calculator.get_crc8(restraint2WithoutCRC, 6, 0x28), 
     restraint2WithoutCRC[0], restraint2WithoutCRC[1], restraint2WithoutCRC[2],
@@ -358,8 +622,18 @@ void sendParkBrakeStatus() {
   CAN.sendMsgBuf(0x36F, 0, 5, abs3WithCRC);
 }
 
-// 0x2BB - Distance Travelled
+// 0x2BB - Distance Travelled & MPG
 void sendDistanceTravelled() {
+  // MPG bar (first 0x2C4 message for MPG calculation)
+  unsigned char mpgWithoutCRC[] = { count, 0xFF, 0x64, 0x64, 0x64, 0x01, 0xF1 };
+  unsigned char mpgWithCRC[] = { 
+    crc8Calculator.get_crc8(mpgWithoutCRC, 7, 0xC6), 
+    mpgWithoutCRC[0], mpgWithoutCRC[1], mpgWithoutCRC[2], 
+    mpgWithoutCRC[3], mpgWithoutCRC[4], mpgWithoutCRC[5], mpgWithoutCRC[6]
+  };
+  CAN.sendMsgBuf(0x2C4, 0, 8, mpgWithCRC);
+  
+  // MPG bar 2 (this one actually moves the bar)
   unsigned char mpg2WithoutCRC[] = { 
     0xF0 | counter4Bit, 
     distanceTravelledCounter & 0xFF,
@@ -426,6 +700,52 @@ void processSerialCommand() {
   if (Serial.available() > 0) {
     String command = Serial.readStringUntil('\n');
     command.trim();
+    
+    // Check for cruise control commands without colon
+    if (command == "CCSET") {
+      if (currentSpeed > 0) {
+        cruiseControlActive = true;
+        cruiseSetSpeed = currentSpeed;
+        Serial.println("OK:CCSET:ACTIVE@" + String(cruiseSetSpeed) + "km/h");
+      } else {
+        Serial.println("ERROR:CCSET:SPEED_ZERO");
+      }
+      return;
+    }
+    else if (command == "CCRESUME") {
+      if (cruiseSetSpeed > 0) {
+        cruiseControlActive = true;
+        Serial.println("OK:CCRESUME:ACTIVE@" + String(cruiseSetSpeed) + "km/h");
+      } else {
+        Serial.println("ERROR:CCRESUME:NO_SET_SPEED");
+      }
+      return;
+    }
+    else if (command == "CCCANCEL") {
+      cruiseControlActive = false;
+      Serial.println("OK:CCCANCEL:SPEED_KEPT@" + String(cruiseSetSpeed) + "km/h");
+      return;
+    }
+    else if (command == "CCOFF") {
+      cruiseControlActive = false;
+      cruiseSetSpeed = 0;
+      Serial.println("OK:CCOFF");
+      return;
+    }
+    else if (command == "CCPLUS") {
+      if (cruiseControlActive) {
+        cruiseSetSpeed++;
+        Serial.println("OK:CCPLUS:" + String(cruiseSetSpeed) + "km/h");
+      }
+      return;
+    }
+    else if (command == "CCMINUS") {
+      if (cruiseControlActive && cruiseSetSpeed > 0) {
+        cruiseSetSpeed--;
+        Serial.println("OK:CCMINUS:" + String(cruiseSetSpeed) + "km/h");
+      }
+      return;
+    }
     
     int separatorIndex = command.indexOf(':');
     if (separatorIndex > 0) {
@@ -501,8 +821,52 @@ void processSerialCommand() {
         Serial.println("OK:LEFTBLINK:" + String(leftBlinker));
       }
       else if (cmd == "RIGHTBLINK") {
-        rightBlinker = (value == "1" || value == "ON");S
+        rightBlinker = (value == "1" || value == "ON");
         Serial.println("OK:RIGHTBLINK:" + String(rightBlinker));
+      }
+      else if (cmd == "SOSCALL") {
+        sosCall = (value == "1" || value == "ON");
+        Serial.println("OK:SOSCALL:" + String(sosCall));
+      }
+      else if (cmd == "CHASSIS") {
+        chassisWarning = (value == "1" || value == "ON");
+        Serial.println("OK:CHASSIS:" + String(chassisWarning));
+      }
+      else if (cmd == "CRUISE") {
+        cruiseWarning = (value == "1" || value == "ON");
+        Serial.println("OK:CRUISE:" + String(cruiseWarning));
+      }
+      else if (cmd == "BRAKE") {
+        brakeFailure = (value == "1" || value == "ON");
+        Serial.println("OK:BRAKE:" + String(brakeFailure));
+      }
+      else if (cmd == "DIPPED") {
+        dippedBeamFailure = (value == "1" || value == "ON");
+        Serial.println("OK:DIPPED:" + String(dippedBeamFailure));
+      }
+      else if (cmd == "TRAILER") {
+        trailerReversing = (value == "1" || value == "ON");
+        Serial.println("OK:TRAILER:" + String(trailerReversing));
+      }
+      else if (cmd == "RESTRAINT") {
+        restraintRear = (value == "1" || value == "ON");
+        Serial.println("OK:RESTRAINT:" + String(restraintRear));
+      }
+      else if (cmd == "FASTEN") {
+        fastenSeatbelts = (value == "1" || value == "ON");
+        Serial.println("OK:FASTEN:" + String(fastenSeatbelts));
+      }
+      else if (cmd == "TEST73") {
+        warning73 = (value == "1" || value == "ON");
+        Serial.println("OK:TEST73:" + String(warning73));
+      }
+      else if (cmd == "TEST85") {
+        warning85 = (value == "1" || value == "ON");
+        Serial.println("OK:TEST85:" + String(warning85));
+      }
+      else if (cmd == "TEST88") {
+        warning88 = (value == "1" || value == "ON");
+        Serial.println("OK:TEST88:" + String(warning88));
       }
       else if (cmd == "STATUS") {
         Serial.println("STATUS:");
@@ -512,6 +876,8 @@ void processSerialCommand() {
         Serial.println("TEMP:" + String(engineTemperature));
         Serial.println("FUEL:" + String(fuelLevel));
         Serial.println("MODE:" + String(driveMode));
+        Serial.println("CRUISE_ACTIVE:" + String(cruiseControlActive));
+        Serial.println("CRUISE_SET:" + String(cruiseSetSpeed));
         Serial.println("END");
       }
       else {
@@ -527,7 +893,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("BMW F10 Diesel CAN Controller v3.0");
+  Serial.println("BMW F10 Diesel CAN Controller v3.1 - Rear Seatbelt Fix");
   Serial.println("ESP32-S3 + MCP2515 8MHz");
   
   SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
@@ -543,7 +909,7 @@ void setup() {
   
   CAN.setMode(MCP_NORMAL);
   
-  // Wake-up
+  // Wake-up sequence
   for(int i = 0; i < 10; i++) {
     sendIgnitionStatus();
     sendBacklight();
@@ -553,6 +919,7 @@ void setup() {
   }
   
   Serial.println("READY!");
+  Serial.println("Rear seatbelt warning disabled");
 }
 
 void loop() {
@@ -576,7 +943,7 @@ void loop() {
   sendPowerSteering();     // Steering OK
   sendCruiseControl();     // Cruise control OK
   sendAirbag();            // Airbag OK
-  sendSeatbeltSystem();    // Seatbelt system OK
+  sendSeatbeltSystem();    // Seatbelt system OK (0x297 - all buckled)
   sendTPMS();              // TPMS OK
   sendEngineTemperature(); // Engine temp
   sendOilTemperature();    // Oil temp gauge
